@@ -24,18 +24,31 @@ const JWT_SECRET = "chatwave_secret_key_2024";
 const PORT = 3000;
 
 // ─── Google Sheets Config ─────────────────────────────────────────────────────
-// ⚠️  Fill in your Sheet ID below (from the Google Sheet URL)
-const GOOGLE_SHEET_ID = "185agnpe9htY1XjrLcZJ7Ye6HmTRvE2AMHo56554_h8w";
-const SHEET_NAME      = "Sheet1"; // Change if your sheet tab has a different name
+// Reads Sheet ID from environment variable (set in Railway) or falls back to local value
+const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || "YOUR_GOOGLE_SHEET_ID_HERE";
+const SHEET_NAME      = process.env.SHEET_NAME      || "Sheet1";
 
-// Authenticates using the service-account.json file in the project root
+// Authenticates using env variable (Railway) or local service-account.json file
 async function getSheetClient() {
-  const auth = new google.auth.GoogleAuth({
-    keyFile: path.join(__dirname, "service-account.json"),
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-  const authClient = await auth.getClient();
-  return google.sheets({ version: "v4", auth: authClient });
+  let credentials;
+  if (process.env.GOOGLE_SERVICE_ACCOUNT) {
+    // Running on Railway — credentials stored as environment variable
+    credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    const authClient = await auth.getClient();
+    return google.sheets({ version: "v4", auth: authClient });
+  } else {
+    // Running locally — use service-account.json file
+    const auth = new google.auth.GoogleAuth({
+      keyFile: path.join(__dirname, "service-account.json"),
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    const authClient = await auth.getClient();
+    return google.sheets({ version: "v4", auth: authClient });
+  }
 }
 
 // Appends one row [Name, Email, Timestamp] to the Google Sheet
