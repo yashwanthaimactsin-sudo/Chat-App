@@ -11,6 +11,8 @@ const sqlite3 = require("sqlite3").verbose();
 const jwt = require("jsonwebtoken");
 const path = require("path");
 const { v4: uuidv4 } = require("uuid");
+const ExcelJS = require("exceljs");
+const { google } = require("googleapis");
 
 const app = express();
 const server = http.createServer(app);
@@ -20,6 +22,50 @@ const io = new Server(server, {
 
 const JWT_SECRET = "chatwave_secret_key_2024";
 const PORT = 3000;
+
+// ─── Google Sheets Config ─────────────────────────────────────────────────────
+// ⚠️  Fill in your Sheet ID below (from the Google Sheet URL)
+const GOOGLE_SHEET_ID = "185agnpe9htY1XjrLcZJ7Ye6HmTRvE2AMHo56554_h8w";
+const SHEET_NAME      = "Sheet1"; // Change if your sheet tab has a different name
+
+// Authenticates using the service-account.json file in the project root
+async function getSheetClient() {
+  const auth = new google.auth.GoogleAuth({
+    keyFile: path.join(__dirname, "service-account.json"),
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+  const authClient = await auth.getClient();
+  return google.sheets({ version: "v4", auth: authClient });
+}
+
+// Appends one row [Name, Email, Timestamp] to the Google Sheet
+async function appendUserToSheet(username, email, createdAt) {
+  try {
+    const sheets = await getSheetClient();
+    const timestamp = new Date(createdAt).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day:   "2-digit",
+      month: "short",
+      year:  "numeric",
+      hour:  "2-digit",
+      minute:"2-digit",
+      second:"2-digit",
+    });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range:         `${SHEET_NAME}!A:C`,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: {
+        values: [[username, email, timestamp]],
+      },
+    });
+    console.log(`📊 Google Sheet updated — new user: ${username} (${email})`);
+  } catch (err) {
+    // Log but don't crash the server if Sheets update fails
+    console.error("⚠️  Google Sheets update failed:", err.message);
+  }
+}
 
 // ─── Database Setup ────────────────────────────────────────────────────────────
 const db = new sqlite3.Database("./chatwave.db", (err) => {
@@ -110,6 +156,11 @@ app.post("/api/signup", (req, res) => {
         JWT_SECRET,
         { expiresIn: "30d" }
       );
+
+      // Auto-update Google Sheet with new user details
+      const now = new Date().toISOString();
+      appendUserToSheet(username.trim(), email.toLowerCase().trim(), now);
+
       res.json({ token, user: { id, email: email.toLowerCase().trim(), username: username.trim(), avatar_color: color } });
     }
   );
@@ -259,6 +310,101 @@ app.get("/api/conversations/:id/messages", authenticate, (req, res) => {
     }
   );
 });
+
+
+// ─── Admin Export Route ───────────────────────────────────────────────────────
+// Only the app creator can access this using the secret key below.
+// Visit: http://localhost:3000/api/admin/users-export?key=YOUR_ADMIN_KEY
+
+const ADMIN_KEY = "chatwave_admin_2024"; // ← Change this to your own secret key
+
+app.get("/api/admin/users-export", async (req, res) => {
+  // Check secret key
+  if (req.query.key !== ADMIN_KEY) {
+    return res.status(403).send("Access denied. Invalid admin key.");
+  }
+
+  try {
+    db.all(
+      "SELECT username, email, created_at FROM users ORDER BY created_at ASC",
+      [],
+      async (err, rows) => {
+        if (err) return res.status(500).send("Database error");
+
+        const wb = new ExcelJS.Workbook();
+        wb.creator = "ChatWave Admin";
+        wb.created = new Date();
+
+        const ws = wb.addWorksheet("Registered Users");
+
+        // ── Column definitions ──
+        ws.columns = [
+          { header: "Name",         key: "username",   width: 28 },
+          { header: "Email ID",     key: "email",      width: 36 },
+          { header: "Joined On",    key: "created_at", width: 24 },
+        ];
+
+        // ── Header row style ──
+        const headerRow = ws.getRow(1);
+        headerRow.height = 30;
+        headerRow.eachCell((cell) => {
+          cell.fill   = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2D2060" } };
+          cell.font   = { bold: true, color: { argb: "FFE8E0FF" }, name: "Arial", size: 12 };
+          cell.alignment = { horizontal: "center", vertical: "middle" };
+          cell.border = {
+            top:    { style: "thin", color: { argb: "FF7C6AF5" } },
+            bottom: { style: "thin", color: { argb: "FF7C6AF5" } },
+            left:   { style: "thin", color: { argb: "FF7C6AF5" } },
+            right:  { style: "thin", color: { argb: "FF7C6AF5" } },
+          };
+        });
+
+        // ── Data rows ──
+        rows.forEach((user, idx) => {
+          const row = ws.addRow({
+            username:   user.username,
+            email:      user.email,
+            created_at: new Date(user.created_at).toLocaleString(),
+          });
+          row.height = 22;
+          const fillColor = idx % 2 === 0 ? "FFF0EEFF" : "FFFFFFFF";
+          row.eachCell((cell) => {
+            cell.fill      = { type: "pattern", pattern: "solid", fgColor: { argb: fillColor } };
+            cell.font      = { name: "Arial", size: 11, color: { argb: "FF1A1A24" } };
+            cell.alignment = { vertical: "middle" };
+            cell.border    = {
+              top:    { style: "thin", color: { argb: "FFDDDDEE" } },
+              bottom: { style: "thin", color: { argb: "FFDDDDEE" } },
+              left:   { style: "thin", color: { argb: "FFDDDDEE" } },
+              right:  { style: "thin", color: { argb: "FFDDDDEE" } },
+            };
+          });
+        });
+
+        // ── Summary row at the bottom ──
+        ws.addRow([]);
+        const totalRow = ws.addRow(["Total Users", rows.length, ""]);
+        totalRow.height = 22;
+        totalRow.getCell(1).font = { bold: true, name: "Arial", size: 11 };
+        totalRow.getCell(2).font = { bold: true, name: "Arial", size: 11, color: { argb: "FF7C6AF5" } };
+
+        // Freeze header
+        ws.views = [{ state: "frozen", ySplit: 1 }];
+
+        // Stream as download
+        const filename = "chatwave_users_" + new Date().toISOString().slice(0, 10) + ".xlsx";
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        res.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+        await wb.xlsx.write(res);
+        res.end();
+      }
+    );
+  } catch (err) {
+    console.error("Export error:", err);
+    res.status(500).send("Export failed");
+  }
+});
+
 
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
 const onlineUsers = new Map(); // userId -> socketId
